@@ -1,208 +1,284 @@
-# main.py
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
-import os, shutil, sqlite3, datetime, hashlib
+from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Security, APIRouter
+from database import Base, engine, SessionLocal, get_db
+import schemas
+from models import User
+from sqlalchemy.orm import Session
+from fastapi.staticfiles import StaticFiles
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from passlib.context import CryptContext
+import shutil
+import os
+from fastapi.openapi.utils import get_openapi
+from auth import get_current_user
 
-APP_DIR = os.path.dirname(__file__)
-UPLOAD_DIR = os.path.join(APP_DIR, "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-DATABASE = os.path.join(APP_DIR, "repair_map.db")
-ADMIN_TOKEN = "change_this_to_secure_token"  # promijeni prije produkcije
-
-app = FastAPI(title="Split Repair Map - API (MVP)")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # proizvodno ograniči na front-end domenu
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="Split Repair Map",
+    version="0.1.0",
+    description="API za prijavu komunalnih problema u Splitu"
 )
 
-# --- DB helper ---
+SECRET_KEY = os.getenv("SECRET_KEY", "fallback_key")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+def verify_password(plain, hashed):
+    return pwd_context.verify(plain, hashed)
+
+def create_access_token(data: dict, expires_delta=None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=60)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+Base.metadata.create_all(bind=engine)
+
+def create_initial_admin():
+    """
+    Kreira admin korisnika ako ga nema. Podatke uzima iz env varijabli:
+    ADMIN_USERNAME i ADMIN_PASSWORD.
+    Ako nisu postavljene, funkcija neće kreirati administratorski račun
+    (smanjuje rizik hard-coded lozinki).
+    """
+    admin_username = os.getenv("ADMIN_USERNAME")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+
+    if not admin_username or not admin_password:
+        # Ne stvaraj fallback admina bez eksplicitnih varijabli
+        return
+
+    db = SessionLocal()
+    try:
+        existing = db.query(models.User).filter(models.User.username == admin_username).first()
+        if existing:
+            # ako već postoji, osiguraj da je admin (možeš odlučiti hoće li postaviti flag)
+            if existing.is_admin != 1:
+                existing.is_admin = 1
+                db.commit()
+            return
+
+        # stvori admin korisnika
+        hashed = hash_password(admin_password)
+        admin = models.User(username=admin_username, password=hashed, is_admin=1)
+        db.add(admin)
+        db.commit()
+    finally:
+        db.close()
+
+# Pozovi funkciju pri startupu aplikacije
+@app.on_event("startup")
+def on_startup():
+    create_initial_admin()
+
 def get_db():
-    conn = sqlite3.connect(DATABASE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def init_db():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.executescript("""
-    CREATE TABLE IF NOT EXISTS issues (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      description TEXT,
-      category TEXT,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
-      address TEXT,
-      photo_path TEXT,
-      status TEXT NOT NULL DEFAULT 'zaprimljeno',
-      votes INTEGER NOT NULL DEFAULT 0,
-      reporter_name TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS comments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      issue_id INTEGER,
-      author TEXT,
-      message TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS admins (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE,
-      password_hash TEXT
-    );
-    """)
-    conn.commit()
-    conn.close()
+admin_router = APIRouter(prefix="/admin", tags=["Admin"])
 
-init_db()
 
-# --- Pydantic schemas ---
-class IssueCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
-    category: Optional[str] = None
-    latitude: float
-    longitude: float
-    address: Optional[str] = None
-    reporter_name: Optional[str] = None
+def admin_required(current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access only")
+    return current_user
 
-class IssueOut(BaseModel):
-    id: int
-    title: str
-    description: Optional[str]
-    category: Optional[str]
-    latitude: float
-    longitude: float
-    address: Optional[str]
-    photo_url: Optional[str]
-    status: str
-    votes: int
-    reporter_name: Optional[str]
-    created_at: str
-    updated_at: str
 
-# --- Helpers ---
-def save_upload(file: UploadFile) -> str:
-    ext = os.path.splitext(file.filename)[1]
-    stamp = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-    fname = f"{stamp}{ext}"
-    fpath = os.path.join(UPLOAD_DIR, fname)
-    with open(fpath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    return fpath
+# 1) GET /admin/users – lista svih korisnika
+@admin_router.get("/users")
+def list_users(db: Session = Depends(get_db), current_user: User = Depends(admin_required)):
+    return db.query(User).all()
 
-def row_to_issue(row):
-    if not row:
-        return None
-    photo_path = row["photo_path"]
-    photo_url = None
-    if photo_path:
-        photo_url = f"/photo/{os.path.basename(photo_path)}"
-    return {
-        "id": row["id"],
-        "title": row["title"],
-        "description": row["description"],
-        "category": row["category"],
-        "latitude": row["latitude"],
-        "longitude": row["longitude"],
-        "address": row["address"],
-        "photo_url": photo_url,
-        "status": row["status"],
-        "votes": row["votes"],
-        "reporter_name": row["reporter_name"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"]
+
+# 2) POST /admin/create_user – stvara korisnika (može biti admin)
+from schemas import UserCreate
+from auth import hash_password
+
+@admin_router.post("/create_user")
+def create_user_admin(user: UserCreate, db: Session = Depends(get_db), current_user: User = Depends(admin_required)):
+    existing = db.query(User).filter(User.username == user.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    new_user = User(
+        username=user.username,
+        password=hash_password(user.password),
+        is_admin=user.is_admin  # ovo omogućuje stvaranje admina
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+# 3) DELETE /admin/users/{id} – admin može brisati bilo koga
+@admin_router.delete("/users/{user_id}")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_required)
+):
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db.delete(user)
+    db.commit()
+    return {"message": "User deleted"}
+
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+
+# --------------------------
+# CUSTOM SWAGGER AUTH (VALUE POLJE)
+# --------------------------
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title="Split Repair Map",
+        version="0.1.0",
+        description="API za prijavu komunalnih problema u Splitu",
+        routes=app.routes,
+    )
+
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+        }
     }
 
-# --- Endpoints ---
-@app.post("/issues", response_model=IssueOut)
-async def create_issue(
+    # automatski dodaj security na sve endpointe koji koriste get_current_user
+    for path in openapi_schema["paths"].values():
+        for method in path.values():
+            if "security" not in method:
+                method["security"] = [{"BearerAuth": []}]
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "OK"}
+
+
+@app.post("/problems", response_model=schemas.ProblemResponse)
+async def create_problem(
     title: str = Form(...),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
-    description: Optional[str] = Form(None),
-    category: Optional[str] = Form(None),
-    address: Optional[str] = Form(None),
-    reporter_name: Optional[str] = Form(None),
-    photo: Optional[UploadFile] = File(None)
+    description: str = Form(...),
+    latitude: str = Form(None),
+    longitude: str = Form(None),
+    address: str = Form(None),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(lambda: get_current_user())
 ):
-    photo_path = None
-    if photo:
-        photo_path = save_upload(photo)
+    user_id = current_user.id
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO issues (title, description, category, latitude, longitude, address, photo_path, reporter_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (title, description, category, latitude, longitude, address, photo_path, reporter_name)
+    upload_folder = "uploads"
+    os.makedirs(upload_folder, exist_ok=True)
+
+    file_location = f"{upload_folder}/{file.filename}"
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    location = models.Location(
+        latitude=latitude,
+        longitude=longitude,
+        address=address
     )
-    conn.commit()
-    iid = cur.lastrowid
-    row = cur.execute("SELECT * FROM issues WHERE id = ?", (iid,)).fetchone()
-    conn.close()
-    return row_to_issue(row)
+    db.add(location)
+    db.commit()
+    db.refresh(location)
 
-@app.get("/issues", response_model=List[IssueOut])
-def list_issues(skip: int = 0, limit: int = 100, status: Optional[str] = None):
-    conn = get_db()
-    cur = conn.cursor()
+    status = db.query(models.Status).filter(models.Status.name == "open").first()
+    if not status:
+        status = models.Status(name="open")
+        db.add(status)
+        db.commit()
+        db.refresh(status)
+
+    problem = models.Problem(
+        title=title,
+        description=description,
+        image_path=file_location,
+        location_id=location.id,
+        status_id=status.id,
+        user_id=user_id
+    )
+
+    db.add(problem)
+    db.commit()
+    db.refresh(problem)
+
+    return problem
+
+
+
+@app.get("/problems", response_model=list[schemas.ProblemResponse])
+def list_problems(status: str = None, db: Session = Depends(get_db)):
+    query = db.query(models.Problem)
+
     if status:
-        rows = cur.execute("SELECT * FROM issues WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?", (status, limit, skip)).fetchall()
-    else:
-        rows = cur.execute("SELECT * FROM issues ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit, skip)).fetchall()
-    conn.close()
-    return [row_to_issue(r) for r in rows]
+        status_obj = db.query(models.Status).filter(models.Status.name == status).first()
+        if status_obj:
+            query = query.filter(models.Problem.status_id == status_obj.id)
 
-@app.get("/issues/{issue_id}", response_model=IssueOut)
-def get_issue(issue_id: int):
-    conn = get_db()
-    row = conn.execute("SELECT * FROM issues WHERE id = ?", (issue_id,)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Issue not found")
-    return row_to_issue(row)
+    problems = query.order_by(models.Problem.created_at.desc()).all()
+    return problems
 
-@app.post("/issues/{issue_id}/vote")
-def vote_issue(issue_id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE issues SET votes = votes + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (issue_id,))
-    conn.commit()
-    row = cur.execute("SELECT votes FROM issues WHERE id = ?", (issue_id,)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Issue not found")
-    return {"issue_id": issue_id, "votes": row["votes"]}
 
-@app.put("/issues/{issue_id}/status")
-def update_status(issue_id: int, status: str = Form(...), token: str = Form(...)):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE issues SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (status, issue_id))
-    conn.commit()
-    row = cur.execute("SELECT * FROM issues WHERE id = ?", (issue_id,)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Issue not found")
-    return row_to_issue(row)
+@app.get("/problems/{problem_id}", response_model=schemas.ProblemResponse)
+def get_problem(problem_id: int, db: Session = Depends(get_db)):
+    problem = db.query(models.Problem).filter(models.Problem.id == problem_id).first()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+    return problem
 
-@app.get("/photo/{fname}")
-def get_photo(fname: str):
-    fpath = os.path.join(UPLOAD_DIR, fname)
-    if not os.path.exists(fpath):
-        raise HTTPException(status_code=404)
-    return FileResponse(fpath)
+
+
+@app.post("/register")
+def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    hashed = hash_password(user.password)
+    new_user = models.User(username=user.username, password=hashed, is_admin=0)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return {"message": "User created"}
+
+
+@app.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == form_data.username).first()
+
+    if not user or not verify_password(form_data.password, user.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_access_token({"sub": user.username})
+
+    return {"access_token": token, "token_type": "bearer"}
+
+app.include_router(admin_router)
