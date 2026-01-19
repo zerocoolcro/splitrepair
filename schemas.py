@@ -85,3 +85,39 @@ class ProblemResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class ProblemListOut(BaseModel):
+    id: int
+    title: str
+    latitude: float
+    longitude: float
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class CommentCreate(BaseModel):
+    text: str
+
+class CommentOut(BaseModel):
+    id: int
+    text: str
+    created_at: datetime
+    username: str
+
+    class Config:
+        from_attributes = True
+
+class VoteOut(BaseModel):
+    problem_id: int
+    votes: int
+
+class NotificationOut(BaseModel):
+    id: int
+    message: str
+    is_read: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

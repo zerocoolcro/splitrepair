@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import get_db
-from models import Problem, Status
+from models import Problem, Status, User, Notification, ProblemStatusHistory
 from auth import get_current_user
 from schemas import ProblemResponse, StatusHistoryOut
-from models import User
+from datetime import datetime
 
 admin_problems_router = APIRouter(
     prefix="/admin/problems",
@@ -67,7 +67,11 @@ def update_problem_status(
 
     # ✅ PROMIJENI STATUS
     problem.status_id = new_status.id
-
+    note = Notification(
+        user_id=problem.user_id,
+        message=f"Status tvog problema '{problem.title}' je promijenjen u {new_status.name}"
+    )
+    db.add(note)
     db.commit()
     db.refresh(problem)
 
@@ -112,3 +116,4 @@ def delete_problem(problem_id: int, db: Session = Depends(get_db), current_user:
     db.commit()
 
     return {"message": "Problem deleted"}
+
