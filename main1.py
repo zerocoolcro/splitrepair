@@ -32,7 +32,7 @@ from routers.admin_stats import router as admin_stats_router
 from routers.saved import router as saved_router
 from routers.comments import router as comments_router
 from routers.saved_problems import router as saved_problems_router
-
+from fastapi.middleware.cors import CORSMiddleware
 
 
 
@@ -63,6 +63,22 @@ def seed_statuses():
 
 seed_admin()
 seed_statuses()
+
+# ---------------------------
+origins = [
+    "http://localhost:5173",  # frontend URL
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # dopušta POST, OPTIONS, GET, PATCH...
+    allow_headers=["*"],
+)
+# ---------------------------
+
+
 
 # ---------------------------
 # UPLOADS
@@ -289,8 +305,9 @@ def read_current_user(current_user: User = Depends(get_current_user)):
     return {
         "id": current_user.id,
         "username": current_user.username,
-        "is_admin": current_user.is_admin,
+        "role": "admin" if current_user.is_admin else "user",
     }
+
 
 # ---------------------------
 # ROUTERS
