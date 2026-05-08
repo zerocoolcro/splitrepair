@@ -8,8 +8,11 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
     password = Column(String)
-    is_admin = Column(Integer, default=False)
+    is_admin = Column(Boolean, default=False)  # promijenjeno sa Integer na Boolean
     created_at = Column(DateTime, default=datetime.utcnow)
 
     problems = relationship("Problem", back_populates="user")
@@ -18,7 +21,12 @@ class User(Base):
     saved_problems = relationship("SavedProblem", back_populates="user", cascade="all, delete")
 
 
+class Status(Base):
+    __tablename__ = "statuses"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False)
 
+    problems = relationship("Problem", back_populates="status")  # važno za Admin panel
 
 
 class Location(Base):
@@ -29,14 +37,9 @@ class Location(Base):
     address = Column(String)
 
 
-class Status(Base):
-    __tablename__ = "statuses"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, nullable=False)
-
-
 class Problem(Base):
     __tablename__ = "problems"
+
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String)
     description = Column(String)
@@ -44,14 +47,16 @@ class Problem(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user_id = Column(Integer, ForeignKey("users.id"))
+    status_id = Column(Integer, ForeignKey("statuses.id"), nullable=False)
     location_id = Column(Integer, ForeignKey("locations.id"))
-    status_id = Column(Integer, ForeignKey("statuses.id"))
 
     user = relationship("User", back_populates="problems")
+    status = relationship("Status", back_populates="problems")
     location = relationship("Location")
-    status = relationship("Status")
 
-    image_url = Column(String, nullable=True)
+    comments = relationship("Comment", back_populates="problem", cascade="all, delete")
+    votes = relationship("ProblemVote", back_populates="problem", cascade="all, delete")
+    saved_by_users = relationship("SavedProblem", back_populates="problem", cascade="all, delete")
 
     status_history = relationship(
         "ProblemStatusHistory",
@@ -59,9 +64,6 @@ class Problem(Base):
         cascade="all, delete-orphan"
     )
 
-    comments = relationship("Comment", back_populates="problem", cascade="all, delete")
-    votes = relationship("ProblemVote", back_populates="problem", cascade="all, delete")
-    saved_by_users = relationship("SavedProblem", back_populates="problem", cascade="all, delete")
 
 
 

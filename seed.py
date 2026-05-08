@@ -16,6 +16,7 @@ def seed_admin():
             admin = models.User(
                 username="admin",
                 password=hash_password("admin123"),
+                email="admin@example.com",
                 is_admin=1
             )
             db.add(admin)

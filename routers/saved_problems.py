@@ -6,8 +6,13 @@ from auth import get_current_user
 
 router = APIRouter(prefix="/saved", tags=["Saved Problems"])
 
+# ---------------------------
 # Spremi problem
-@router.post("/{problem_id}")
+# ---------------------------
+@router.post(
+    "/{problem_id}",
+    operation_id="save_problem_by_id"  # jedinstveni operation_id
+)
 def save_problem(
     problem_id: int,
     db: Session = Depends(get_db),
@@ -25,8 +30,13 @@ def save_problem(
     db.commit()
     return {"message": "Problem saved"}
 
+# ---------------------------
 # Ukloni problem iz spremljenih
-@router.delete("/{problem_id}")
+# ---------------------------
+@router.delete(
+    "/{problem_id}",
+    operation_id="remove_saved_problem_by_id"  # jedinstveni operation_id
+)
 def remove_saved_problem(
     problem_id: int,
     db: Session = Depends(get_db),
@@ -43,8 +53,14 @@ def remove_saved_problem(
     db.commit()
     return {"message": "Problem removed from saved list"}
 
+# ---------------------------
 # Lista svih spremljenih problema
-@router.get("/", response_model=list[dict])
+# ---------------------------
+@router.get(
+    "/",
+    response_model=list[dict],
+    operation_id="list_all_saved_problems"  # jedinstveni operation_id
+)
 def list_saved_problems(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)

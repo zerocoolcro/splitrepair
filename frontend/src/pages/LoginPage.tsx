@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { loginRequest } from "@/services/auth.service";
 import { useAuth } from "@/hooks/useAuth";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
+import { authStore } from "@/store/auth.store";
 
 export default function LoginPage() {
   const [username, setUsername] = useState("");
@@ -13,7 +14,15 @@ export default function LoginPage() {
     e.preventDefault();
     try {
       const data = await loginRequest(username, password);
-      await login(data.access_token);   // 👈 token + /me + setUser
+
+      // 👇 OVO DODAJEŠ
+      localStorage.setItem("token", data.access_token);
+      localStorage.setItem("username", username);
+
+      authStore.token = data.access_token;
+    
+
+      await login(data.access_token);   // tvoj postojeći auth hook
       navigate("/dashboard");
     } catch (err) {
       console.error(err);
@@ -41,6 +50,14 @@ export default function LoginPage() {
         <button className="bg-black text-white w-full py-2 rounded">
           Login
         </button>
+
+        <p className="text-sm text-center mt-4">
+          Nemaš račun?{" "}
+          <Link to="/register" className="text-blue-500 hover:underline">
+            Registriraj se
+          </Link>
+        </p>
+
       </form>
     </div>
   );

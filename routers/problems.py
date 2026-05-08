@@ -5,6 +5,8 @@ import os, uuid, shutil
 from database import get_db
 from models import Problem, Status, User, ProblemVote, Location
 from auth import get_current_user
+from websocket_manager import manager
+
 
 router = APIRouter()
 
@@ -40,13 +42,35 @@ async def create_problem(
     db.commit()
     db.refresh(problem)
 
-    return problem
+    # 🔔 Pošalji real-time notifikaciju adminima
+    admins = db.query(User).filter(User.role == "admin").all()
+
+    for admin in admins:
+        await manager.send_personal_notification(
+            admin.id,
+            {
+                "type": "new_problem",
+                "message": f"Novi problem: {problem.title}",
+                "problem_id": problem.id,
+            },
+        )
+
+
+    return {
+        "id": problem.id,
+        "title": problem.title,
+        "description": problem.description,
+        "image_url": problem.image_url,
+        "status": problem.status.name if problem.status else None,
+        "created_at": problem.created_at,
+    }
+
 
 
 @router.get("/problems")
 def list_problems(
+    q: str | None = None,         # 👈 frontend šalje q
     status: str | None = None,
-    search: str | None = None,
     sort: str | None = "new",
     page: int = 1,
     limit: int = 10,
@@ -59,11 +83,11 @@ def list_problems(
         query = query.filter(Status.name == status)
 
     # search in title + description
-    if search:
+    if q:
         query = query.filter(
             or_(
-                Problem.title.ilike(f"%{search}%"),
-                Problem.description.ilike(f"%{search}%")
+                Problem.title.ilike(f"%{q}%"),
+                Problem.description.ilike(f"%{q}%")
             )
         )
 
@@ -103,6 +127,8 @@ def list_problems(
             for p in problems
         ]
     }
+
+
 
 
 @router.get("/map/problems")
